@@ -11,4 +11,10 @@ cd /opt/stackwithless/agent
 virtualenv env
 source env/bin/activate
 pip3 install -r requirements.txt 
+
+docker pull redis
+#docker run --name stackwithless -d redis redis-server --appendonly yes -v /opt/stackwithless/db:/data
+docker run --name stackwithless -d redis redis-server 
+
+
 ```
