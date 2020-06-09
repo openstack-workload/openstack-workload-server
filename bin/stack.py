@@ -10,6 +10,9 @@ import datetime
 import redis
 import sys
 import operator
+from slog import slog
+
+
 
 class Withless:
     r = None
@@ -24,6 +27,11 @@ class Withless:
     allhosts_info = {}
 
     vms = {}
+    slog = None
+    
+
+    def __init__(self):
+        self.slog = slog()
 
     def connect(self):
         self.r = redis.Redis(
@@ -32,23 +40,42 @@ class Withless:
             password=       stackconfig.REDIS_PASSWORD
         )
 
+    def blacklist(self, vm, seconds=stackconfig.VM_BLACKLIST_SECS):
+        eol=int(time.time()) + seconds
+        self.r.hset("vm_blacklist", vm, eol)
+
+    def is_blacklisted(self, vm):
+        eol=self.r.hget("vm_blacklist", vm)
+
+        if eol == None:
+            return False
+
+        eol=int(eol)
+        n = int(time.time())
+        if eol > n:
+            return True
+
+        return False
+
 
     def prepare(self):
         allhosts_json = {}
         self.allhosts = self.r.hkeys('hosts.lastminute')
 
-
+        self.slog.p("################## time check")
         for host in self.allhosts:
             host_lastminute                 = self.r.hget('hosts.lastminute', host)
             host_key                        = 'hosts.json.' + host
-            print(host, 'last minute:', host_lastminute)
-
+            self.slog.p("host {host} - last minute: {minute}".format(host=host, minute=host_lastminute))
             allhosts_json[host]             = self.r.hget(host_key, host_lastminute)
             self.allhosts_data[host]        = json.loads(allhosts_json[host])
 
             if self.allhosts_data[host] != None:
                 self.allhosts_load[host]   = self.allhosts_data[host]['sys_info']['cpu_percent']
 
+
+        self.slog.p("################## time check end")
+        self.slog.p("\n\n")
 
 
 
@@ -89,13 +116,13 @@ class Withless:
             host_data       = self.allhosts_data[host]
             host_sys        = host_data['sys_info']
             host_procs      = host_data['kvm_procs']
-            #print(host, 'cores total:', host_sys['cores'], '% cpu:', host_sys['cpu_percent'], 'vms:', len(host_procs))
+            #self.slog.p(host, 'cores total:', host_sys['cores'], '% cpu:', host_sys['cpu_percent'], 'vms:', len(host_procs))
 
             for pid in host_procs:
                 if 'libvirtdata' in host_procs[pid]:
                     vmdata                              = host_procs[pid]['libvirtdata']
                     uuid                                = vmdata['uuid']
-                    self.vms[uuid]                      = {'host': host, 'vmdata': vmdata}
+                    self.vms[uuid]                      = {'host': host, 'vmdata': vmdata, 'process' : host_procs[pid]}
 
                     self.allhosts_vmcpu[host][uuid]     = host_procs[pid]['cputime_diff']
 
@@ -124,6 +151,8 @@ class Withless:
             active_host         = self.vms[uuid]['host']
             vm_ram_gb           = float(self.vms[uuid]['vmdata']['memory']) / float(1024.00)
             vm_vcpu             = float(self.vms[uuid]['vmdata']['vcpus'])
+            vm_vcpu_usage       = float(self.vms[uuid]['process']['cputime_diff'])
+
             active_host_info    = self.allhosts_info[active_host]
             
 
@@ -132,22 +161,25 @@ class Withless:
 
                 host_info = self.allhosts_info[host]
                 if host != active_host and new_host == False:
-                    print(host, host_info['host_cores_free'], host_info['host_ram_gb_free'])
-                    new_vcpu        = host_info['host_cores_free'] - vm_vcpu
-                    new_ram_free    = host_info['host_ram_gb_free'] - vm_ram_gb
-                    print("host new:", host, new_vcpu, new_ram_free)
-                    print("host old", active_host, active_host_info['host_cores_free'], active_host_info['host_ram_gb_free'])
-                    if new_vcpu < active_host_info['host_cores_free']:
-                        print("new vcpu ok")
+                    self.slog.p("host {host} cores free {cores} ram free {ram}".format(host=host, cores=host_info['host_cores_free'], ram=host_info['host_ram_gb_free']))
+                    new_vcpu_free       = host_info['host_cores_free'] - vm_vcpu_usage
+                    new_ram_free        = host_info['host_ram_gb_free'] - vm_ram_gb
+                    old_vcpu_free       = active_host_info['host_cores_free'] + vm_vcpu_usage
+
+                    self.slog.p("host new: {host} vcpu free: {vcpu} ram free: {ram}".format(host=host, vcpu=new_vcpu_free, ram=new_ram_free))
+                    self.slog.p("host old: {host} vcpu free: {vcpu} ram free: {ram}".format(host=active_host, vcpu=active_host_info['host_cores_free'], ram=active_host_info['host_ram_gb_free']))
+
+                    if new_vcpu_free > old_vcpu_free:
+                        self.slog.p("new vcpu ok")
                         if new_ram_free > 16:
-                            print("new ram ok")
+                            self.slog.p("new ram ok")
                             new_host = host
                         else:
-                            print("new ram not ok")
+                            self.slog.p("new ram not ok")
                     else:
-                        print("new vcpu not ok")
+                        self.slog.p("new vcpu not ok: {host} vcpu free: {vcpu} old vcpu free: {vcpu_old}".format(vcpu=new_vcpu_free, vcpu_old=active_host_info['host_cores_free'], host=host))
         else:
-            print("uuid not exist:", uuid)
+            self.slog.p("uuid not exist: {uuid}".format(uuid=uuid))
             return False
 
         return new_host
@@ -156,10 +188,10 @@ class Withless:
     def find_vm_to_migrate(self, host, top = 10):
         vm = None
 
-        print("trying to find a host destination from top", top, "to host:", host) 
+        self.slog.p("trying to find a host destination from top {top} to host {host}".format(top=top, host=host))
 
         if host in self.allhosts_vmcpu_sorted:
-            size = len(self.allhosts_vmcpu_sorted)
+            size = len(self.allhosts_vmcpu_sorted[host])
             if size >= top:
                 vm = self.try_vm_to_migrate_n(host, top - 1) # try to migrate # top or 10
             else:
@@ -169,86 +201,8 @@ class Withless:
 
     def try_vm_to_migrate_n(self, host, n):
         vm = self.allhosts_vmcpu_sorted[host][n][0]
-        print("vm to migrate", vm)
+        self.slog.p("vm to migrate: " + vm)
         return vm
-
-
-
-wless = Withless()
-wless.connect()
-wless.prepare()
-wless.sort_hosts_per_load()
-wless.allhosts_data_to_vms()
-
-host_first =            wless.allhosts_load_sorted[-1]
-host_last =             wless.allhosts_load_sorted[0]
-host_proc_diff =        float(float(host_first[1]) / float(host_last[1]) - 1)
-
-pprint.pprint(wless.allhosts_load_sorted)
-print("first:", host_first, "last:", host_last, "proc diff:", host_proc_diff)
-
-if host_proc_diff > stackconfig.HOST_CPU_DIFF:
-    cpu_diff_human = stackconfig.HOST_CPU_DIFF * 100
-    print("diferenca entre primeira e ultima host maior que: ", cpu_diff_human, "%, vamos realizar uma migracao:", host_proc_diff)
-    n = 1
-    host_destination = False
-    while n <= stackconfig.VM_EACH_LOOP and host_destination == False:
-        top = n * stackconfig.VM_EACH_TOP
-        print("\n\n")
-        print("top:", top, "n:", n)
-
-        vm_to_migrate       = wless.find_vm_to_migrate(host_first[0], top)
-        host_destination    = wless.find_host_to_migrate(vm_to_migrate)
-        n += 1
-        print("final host destination:", host_destination, "vm to migrate:", vm_to_migrate)
-
-for host in wless.allhosts:
-    host_ram= wless.get_ramstats_per_host(host)
-
-    print(
-        "host:", host,
-        "total:", bytes2human.bytes2human(wless.hosts_ram[host]['total']), 
-        "used:", bytes2human.bytes2human(wless.hosts_ram[host]['used']),
-        "free:", bytes2human.bytes2human(wless.hosts_ram[host]['free'])
-    )
-
-
-
-
-sys.exit(0)
-                
-
-
-"""for host in allhosts:
-    host_data       = allhosts_data[host]
-    host_sys        = host_data['sys_info']
-    host_procs      = host_data['kvm_procs']
-    print(host, 'cores total:', host_sys['cores'], '% cpu:', host_sys['cpu_percent'], 'vms:', len(host_procs))
-
-    pidcpu = {}
-    for pid in host_procs:
-        vmdata          = {}
-        if 'libvirtdata' in host_procs[pid]:
-            vmdata = host_procs[pid]['libvirtdata']
-            #print vmdata
-
-
-        pidcpu[pid] = host_procs[pid]['cputime_diff']
-
-    pidcpu_sorted   = sorted(pidcpu.items(), key=operator.itemgetter(1))
-    
-    n = 1
-    while n <= 10:
-        print(pidcpu_sorted[-n])
-        pid = pidcpu_sorted[-n][0]
-        #print(host_procs[pid]['libvirtdata'])
-        pprint.pprint(host_procs[pid])
-        n += 1
-
-
-    print("#####################################\n\n")
-"""
-
 
 
 
