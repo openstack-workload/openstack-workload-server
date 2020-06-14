@@ -79,6 +79,8 @@ if (host_first_cpu / 100) >= stackconfig.HOST_CPU_MAX:
                 dest=host_destination,
                 vm=vm_to_migrate
             ))
+        else:
+            wless.slog.p("vm blacklisted {vm}".format(vm=vm_to_migrate))
             
         n += 1
 

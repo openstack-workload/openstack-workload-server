@@ -121,10 +121,11 @@ class Withless:
             for pid in host_procs:
                 if 'libvirtdata' in host_procs[pid]:
                     vmdata                              = host_procs[pid]['libvirtdata']
-                    uuid                                = vmdata['uuid']
-                    self.vms[uuid]                      = {'host': host, 'vmdata': vmdata, 'process' : host_procs[pid]}
+                    if 'uuid' in vmdata:
+                        uuid                                = vmdata['uuid']
+                        self.vms[uuid]                      = {'host': host, 'vmdata': vmdata, 'process' : host_procs[pid]}
 
-                    self.allhosts_vmcpu[host][uuid]     = host_procs[pid]['cputime_diff']
+                        self.allhosts_vmcpu[host][uuid]     = host_procs[pid]['cputime_diff']
 
             vmcpu_sorted                                = sorted(self.allhosts_vmcpu[host].items(), key=operator.itemgetter(1))
 
